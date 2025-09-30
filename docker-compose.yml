@@ -46,6 +46,12 @@ services:
     env_file: [.env]
     ports:
       - "8003:8003"
+  scorer:
+    build: ./services/scorer
+    env_file: [.env]
+    ports:
+      - "8004:8004"
+
 
 
 volumes:
