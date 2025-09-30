@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / modelos
+data/*.csv
+data/*.tsv
+data/*.json
+data/*.parquet
+!data/.gitkeep
+
+# Reportes compilados LaTeX
+reports/*.pdf
+reports/*.aux
+reports/*.log
+reports/*.out
+reports/*.toc
+
+# Editor/IDE
+.vscode/
+.idea/
