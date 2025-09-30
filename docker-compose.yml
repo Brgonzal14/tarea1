@@ -34,6 +34,9 @@ services:
     depends_on: [postgres]
     ports:
       - "8001:8001"
+    volumes:
+      - ./data:/data:ro   # <-- monta tu carpeta local ./data como /data (solo lectura)
+
 
   # API de caché que habla con Redis
   cache-service:
