@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  # Base de datos relacional para guardar preguntas, resultados y métricas
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${PG_DB}
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASS}
+    ports:
+      - "5432:5432"          # opcional, útil para conectarte desde tu PC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB}"]
+      interval: 5s
+      retries: 10
+
+  # Caché en memoria para acelerar respuestas y probar políticas LRU/LFU
+  redis:
+    image: redis:7
+    command: >
+      redis-server --save "" --appendonly no
+      --maxmemory ${REDIS_MAXMEMORY}
+      --maxmemory-policy ${REDIS_POLICY}   # allkeys-lru | allkeys-lfu | allkeys-random ...
+    ports:
+      - "6379:6379"
+
+  # API de almacenamiento (la llenaremos en el siguiente paso)
+  storage-api:
+    build: ./services/storage-api
+    env_file: [.env]
+    depends_on: [postgres]
+    ports:
+      - "8001:8001"
+
+  # API de caché que habla con Redis
+  cache-service:
+    build: ./services/cache-service
+    env_file: [.env]
+    depends_on: [redis]
+    ports:
+      - "8002:8002"
+
+  # Servicio que genera la respuesta (stub/LLM). Por ahora quedará vacío.
+  responder-llm:
+    build: ./services/responder-llm
+    env_file: [.env]
+    ports:
+      - "8003:8003"
+
+  # Servicio que calcula el “score” de calidad (similaridad)
+  scorer:
+    build: ./services/scorer
+    env_file: [.env]
+    ports:
+      - "8004:8004"
+
+  # Generador de tráfico (Poisson/Bursty). Lo ejecutaremos cuando todo lo demás esté listo.
+  traffic-gen:
+    build: ./services/traffic-gen
+    env_file: [.env]
+    depends_on: [storage-api, cache-service, responder-llm, scorer]
+    # sin puertos públicos por ahora; se lanzará por HTTP interno
+
+volumes:
+  pgdata:
