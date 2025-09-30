@@ -41,6 +41,12 @@ services:
       - redis
     ports:
       - "8002:8002"
+  responder-llm:
+    build: ./services/responder-llm
+    env_file: [.env]
+    ports:
+      - "8003:8003"
+
 
 volumes:
   pgdata:
