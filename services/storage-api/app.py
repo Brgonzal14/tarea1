@@ -70,6 +70,7 @@ def seed(limit: int = 10000):
           * best_answer (o 'answer')
           * id (opcional). Si no viene, se genera.
       - Sin encabezado: [class, title, question, best_answer]
+    SALTA filas con 'question' vacía.
     """
     path = "/data/yahoo.csv"
     if not os.path.exists(path):
@@ -77,6 +78,9 @@ def seed(limit: int = 10000):
 
     inserted = 0
     next_id = 1
+
+    def _clean(s):
+        return (s or "").strip()
 
     with conn_cursor() as (c, cur), open(path, "r", encoding="utf-8", newline="") as f:
         # Detectar encabezado
@@ -103,20 +107,31 @@ def seed(limit: int = 10000):
                 )
 
             for row in rd:
-                # question_id: usa 'id' si viene, si no genera
-                if "id" in row and row["id"] and row["id"].strip().isdigit():
-                    qid = int(row["id"])
+                # Normaliza y filtra vacías
+                klass = _clean(row.get("class"))
+                title = _clean(row.get("title"))
+                question = _clean(row.get("question"))
+                if not question:  # SALTAR VACÍAS
+                    continue
+                best = _clean(row.get("best_answer") if has_best else row.get("answer"))
+
+                # question_id
+                id_raw = _clean(row.get("id")) if "id" in row else ""
+                if id_raw.isdigit():
+                    qid = int(id_raw)
                 else:
                     qid = next_id
                     next_id += 1
 
-                best = row.get("best_answer") if has_best else row.get("answer")
                 try:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO qa_yahoo(question_id,class_id,title,question,best_answer)
                         VALUES(%s,%s,%s,%s,%s)
                         ON CONFLICT (question_id) DO NOTHING
-                    """, (qid, int(row["class"]), row["title"], row["question"], best))
+                        """,
+                        (qid, int(klass) if klass.isdigit() else None, title, question, best),
+                    )
                     inserted += 1
                     if inserted >= limit:
                         break
@@ -129,13 +144,18 @@ def seed(limit: int = 10000):
             for row in rr:
                 if not row or len(row) < 4:
                     continue
-                klass, title, question, best = row[0], row[1], row[2], row[3]
+                klass, title, question, best = _clean(row[0]), _clean(row[1]), _clean(row[2]), _clean(row[3])
+                if not question:  # SALTAR VACÍAS
+                    continue
                 try:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO qa_yahoo(question_id,class_id,title,question,best_answer)
                         VALUES(%s,%s,%s,%s,%s)
                         ON CONFLICT (question_id) DO NOTHING
-                    """, (next_id, int(klass), title, question, best))
+                        """,
+                        (next_id, int(klass) if klass.isdigit() else None, title, question, best),
+                    )
                     inserted += 1
                     next_id += 1
                     if inserted >= limit:
@@ -147,20 +167,67 @@ def seed(limit: int = 10000):
 
     return {"inserted": inserted}
 
+# ----------------- Limpieza de vacías (opcional) -----------------
+@app.post("/cleanup_empty")
+def cleanup_empty():
+    """
+    Elimina preguntas con 'question' NULL o vacía y sus resultados asociados.
+    - Paso 1: recolecta IDs 'malas'
+    - Paso 2: borra qa_results de esas IDs
+    - Paso 3: borra qa_yahoo de esas IDs
+    """
+    try:
+        with conn_cursor() as (c, cur):
+            # 1) IDs de preguntas vacías
+            cur.execute("""
+                SELECT question_id
+                FROM qa_yahoo
+                WHERE question IS NULL OR length(trim(question)) = 0
+            """)
+            bad_ids = [r[0] for r in cur.fetchall()]
+
+            if not bad_ids:
+                return {"deleted_results": 0, "deleted_questions": 0, "bad_ids": []}
+
+            # 2) Borra resultados que referencian esas preguntas
+            cur.execute(
+                "DELETE FROM qa_results WHERE question_id = ANY(%s)",
+                (bad_ids,)
+            )
+            deleted_results = cur.rowcount if cur.rowcount is not None else 0
+
+            # 3) Borra las preguntas
+            cur.execute(
+                "DELETE FROM qa_yahoo WHERE question_id = ANY(%s)",
+                (bad_ids,)
+            )
+            deleted_questions = cur.rowcount if cur.rowcount is not None else 0
+
+            return {
+                "deleted_results": deleted_results,
+                "deleted_questions": deleted_questions,
+                "bad_ids": bad_ids[:50]  # muestra solo algunas por si acaso
+            }
+    except Exception as e:
+        log.exception("cleanup_empty failed")
+        raise HTTPException(status_code=500, detail=f"cleanup_empty error: {e}")
+
+
 # ----------------- Random question -----------------
 @app.get("/questions/random")
 def random_question():
-    """Devuelve 1 pregunta aleatoria (ORDER BY random() LIMIT 1; portable)."""
+    """Devuelve 1 pregunta aleatoria, garantizando que 'question' no esté vacía."""
     with conn_cursor() as (c, cur):
         cur.execute("""
             SELECT question_id, title, question, best_answer
             FROM qa_yahoo
+            WHERE question IS NOT NULL AND length(trim(question)) > 0
             ORDER BY random()
             LIMIT 1
         """)
         r = cur.fetchone()
         if not r:
-            raise HTTPException(404, "No hay datos. Ejecuta /seed primero.")
+            raise HTTPException(404, "No hay datos (con question no vacía). Ejecuta /seed primero.")
         return {"question_id": r[0], "title": r[1], "question": r[2], "best_answer": r[3]}
 
 # ----------------- Record result -----------------
