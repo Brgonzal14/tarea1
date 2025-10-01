@@ -1,5 +1,5 @@
 import os, asyncio, time, random
-import httpx
+import httpx # type: ignore
 
 # ---------- Config ----------
 RUN_ID = os.getenv("RUN_ID", "dev1") + f"-{int(time.time())}"

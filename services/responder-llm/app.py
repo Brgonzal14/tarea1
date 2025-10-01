@@ -1,5 +1,5 @@
 import os, time, random
-import httpx
+import httpx # type: ignore
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 

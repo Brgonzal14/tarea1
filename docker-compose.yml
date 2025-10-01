@@ -20,9 +20,6 @@ services:
     command: ["redis-server", "--save", "", "--appendonly", "no",
               "--maxmemory", "${REDIS_MAXMEMORY}",
               "--maxmemory-policy", "${REDIS_POLICY}"]
-    # Si quieres exponer a tu PC, descomenta:
-    # ports:
-    #   - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -40,7 +37,7 @@ services:
     volumes:
       - ./data:/data:ro
     healthcheck:
-      # Python viene en la imagen base; chequea /health interno
+      # chequea /health interno
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=2).status==200 else 1)\""]
       interval: 5s
       timeout: 3s
@@ -87,6 +84,11 @@ services:
     env_file: [.env]
     environment:
       PYTHONUNBUFFERED: "1"   # logs al instante
+      TOTAL_REQUESTS: ${TOTAL_REQUESTS:-1000}
+      TRAFFIC_DIST: ${TRAFFIC_DIST:-poisson}
+      BASE_RATE_RPS: ${BASE_RATE_RPS:-20}
+      DURATION_SECONDS: ${DURATION_SECONDS:-50}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-21600}
     depends_on:
       storage-api:
         condition: service_healthy
