@@ -12,7 +12,8 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB}"]
       interval: 5s
-      retries: 10
+      timeout: 3s
+      retries: 20
 
   redis:
     image: redis:7
@@ -22,6 +23,11 @@ services:
     # Si quieres exponer a tu PC, descomenta:
     # ports:
     #   - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   storage-api:
     build: ./services/storage-api
@@ -33,26 +39,63 @@ services:
       - "8001:8001"
     volumes:
       - ./data:/data:ro
+    healthcheck:
+      # Python viene en la imagen base; chequea /health interno
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=2).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   cache-service:
     build: ./services/cache-service
     env_file: [.env]
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     ports:
       - "8002:8002"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=2).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   responder-llm:
     build: ./services/responder-llm
     env_file: [.env]
     ports:
       - "8003:8003"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=2).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   scorer:
     build: ./services/scorer
     env_file: [.env]
     ports:
       - "8004:8004"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=2).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
-
+  traffic-gen:
+    build: ./services/traffic-gen
+    env_file: [.env]
+    environment:
+      PYTHONUNBUFFERED: "1"   # logs al instante
+    depends_on:
+      storage-api:
+        condition: service_healthy
+      cache-service:
+        condition: service_healthy
+      responder-llm:
+        condition: service_healthy
+      scorer:
+        condition: service_healthy
 
 volumes:
   pgdata:
