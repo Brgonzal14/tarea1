@@ -5,7 +5,7 @@ Este proyecto implementa un sistema distribuido de **preguntas y respuestas** co
 La arquitectura está construida con **Docker Compose**, lo que facilita la orquestación, despliegue y pruebas de cada microservicio.
 
 📷 Imagenes de pruebas:
-https://drive.google.com/drive/folders/1_4DKzxhiB-iAnRHhI1wEXdNRXI-SqoHB?usp=sharing
+https://drive.google.com/drive/folders/1SvRc21y5YZq_YgPq_oZdb4OaUfX-i-eZ?usp=sharing
 
 ---
 
