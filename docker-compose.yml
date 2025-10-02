@@ -60,6 +60,13 @@ services:
   responder-llm:
     build: ./services/responder-llm
     env_file: [.env]
+    environment:
+      # --- LLM config (forzamos inglés y Gemini v1) ---
+      LLM_MODE: GEMINI
+      LLM_LANG: en                # << respuestas en inglés
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: gemini-2.5-flash
+      GEMINI_API_VERSION: v1
     ports:
       - "8003:8003"
     healthcheck:
@@ -67,6 +74,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
 
   scorer:
     build: ./services/scorer

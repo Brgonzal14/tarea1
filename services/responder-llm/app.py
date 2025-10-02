@@ -1,19 +1,28 @@
+# services/responder-llm/app.py
 import os, time, random
-import httpx # type: ignore
+import httpx  # type: ignore
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI(title="responder-llm")
 
-LLM_MODE = os.getenv("LLM_MODE", "STUB").upper()
+# --- Modo LLM
+LLM_MODE = os.getenv("LLM_MODE", "GEMINI").upper()
+
+# --- Idioma (en = English, es = Español). Default: en
+LLM_LANG = os.getenv("LLM_LANG", "en").lower()
+PROMPT_PREFIX = {
+    "en": "Answer in English, concise and clear:\n\n",
+    "es": "Responde en español, breve y claro:\n\n",
+}.get(LLM_LANG, "Answer in English, concise and clear:\n\n")
 
 # --- Gemini config
-GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-GEMINI_API_VERSION  = os.getenv("GEMINI_API_VERSION", "v1")  # <-- v1 o v1beta
-GEMINI_BASE         = "https://generativelanguage.googleapis.com"
+GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL       = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_VERSION = os.getenv("GEMINI_API_VERSION", "v1")  # v1 o v1beta
+GEMINI_BASE        = "https://generativelanguage.googleapis.com"
 
-# STUB (por si lo necesitas para pruebas locales)
+# --- STUB (por si haces pruebas locales)
 LLM_MIN_LAT_MS = int(os.getenv("LLM_MIN_LAT_MS", "200"))
 LLM_MAX_LAT_MS = int(os.getenv("LLM_MAX_LAT_MS", "800"))
 
@@ -25,6 +34,7 @@ def health():
     return {
         "ok": True,
         "mode": LLM_MODE,
+        "lang": LLM_LANG,
         "gemini_key_set": bool(GEMINI_API_KEY),
         "gemini_model": GEMINI_MODEL if LLM_MODE == "GEMINI" else None,
         "gemini_api_version": GEMINI_API_VERSION if LLM_MODE == "GEMINI" else None,
@@ -32,24 +42,27 @@ def health():
 
 @app.get("/models")
 async def list_models():
-    """Devuelve lo que TU clave ve en la API (clave y versión actuales)."""
+    """Devuelve los modelos visibles para tu API key/versión."""
     if not GEMINI_API_KEY:
         raise HTTPException(500, "Falta GEMINI_API_KEY")
     url = f"{GEMINI_BASE}/{GEMINI_API_VERSION}/models?key={GEMINI_API_KEY}"
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.get(url)
-    return {"status": r.status_code, "body": r.json() if r.headers.get("content-type","").startswith("application/json") else r.text}
+    ct = r.headers.get("content-type","")
+    body = r.json() if ct.startswith("application/json") else r.text
+    return {"status": r.status_code, "body": body}
 
 def stub_answer(q: str) -> str:
-    import random, time
     time.sleep(random.randint(LLM_MIN_LAT_MS, LLM_MAX_LAT_MS) / 1000.0)
     return f"(respuesta simulada) A la pregunta: {q[:120]}..."
 
 async def call_gemini(question: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(500, "Falta GEMINI_API_KEY")
+
     url = f"{GEMINI_BASE}/{GEMINI_API_VERSION}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": f"Responde en español, breve y claro:\n\n{question}"}]}]}
+    payload = {"contents": [{"parts": [{"text": f"{PROMPT_PREFIX}{question}"}]}]}
+
     try:
         async with httpx.AsyncClient(timeout=25) as client:
             r = await client.post(url, json=payload)
