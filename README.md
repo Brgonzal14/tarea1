@@ -60,4 +60,8 @@ La arquitectura está construida con **Docker Compose**, lo que facilita la orqu
  `` curl "http://localhost:8002/stats" `` 
 
 
+Estudiante: [Bryan González]
+
+Curso: Sistemas Distribuidos 2025-2
+
 
