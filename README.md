@@ -24,7 +24,7 @@ https://drive.google.com/drive/folders/1SvRc21y5YZq_YgPq_oZdb4OaUfX-i-eZ?usp=sha
 
 - Docker
 - Docker Compose
-- Python 3.10+ (solo si deseas probar manualmente los servicios fuera de Docker)
+- Python 3.10+ 
 
 ---
 
