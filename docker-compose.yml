@@ -17,19 +17,16 @@ services:
 
   redis:
     image: redis:7
-    command:
-      [
-        "redis-server",
-        "--save", "", "--appendonly", "no",
-        "--maxmemory", "${REDIS_MAXMEMORY}",
-        "--maxmemory-policy", "${REDIS_POLICY}"
-      ]
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "${REDIS_MAXMEMORY}",
+              "--maxmemory-policy", "${REDIS_POLICY}"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # --- SERVICIOS KAFKA ---
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.2
     environment:
@@ -48,9 +45,9 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:29092"
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:29092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
@@ -72,26 +69,32 @@ services:
         condition: service_healthy
     volumes:
       - ./create_topics.sh:/tmp/create_topics.sh
-    command: ["bash", "-c", "sleep 10 && bash /tmp/create_topics.sh && sleep infinity"]
+    command: bash -c "/tmp/create_topics.sh && echo 'Tópicos creados, durmiendo...' && sleep infinity"
 
+  # --- SERVICIOS APLICACIÓN ---
   storage-api:
     build: ./services/storage-api
     env_file: [.env]
+    # --- MODIFICACIÓN T2: Añadir variables de entorno ---
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_VALIDADOS: resultados_validados
+      KAFKA_CONSUMER_GROUP_STORAGE: storage_consumer_group
+      # Pasa el RUN_ID para que el consumidor sepa dónde guardar los resultados
+      RUN_ID: ${RUN_ID:-dev_t2}
+    # --- FIN MODIFICACIÓN ---
     depends_on:
       postgres:
         condition: service_healthy
-      kafka:
+      kafka: 
         condition: service_healthy
     ports:
       - "8001:8001"
     volumes:
       - ./data:/data:ro
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=3).status==200 else 1)\""
-        ]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=3).status==200 else 1)\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -105,11 +108,7 @@ services:
     ports:
       - "8002:8002"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=3).status==200 else 1)\""
-        ]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=3).status==200 else 1)\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -123,14 +122,12 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: gemini-2.5-flash
       GEMINI_API_VERSION: v1beta
+    depends_on:
+      {} 
     ports:
       - "8003:8003"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=3).status==200 else 1)\""
-        ]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=3).status==200 else 1)\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -138,18 +135,17 @@ services:
   scorer:
     build: ./services/scorer
     env_file: [.env]
+    depends_on:
+      {} 
     ports:
       - "8004:8004"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=3).status==200 else 1)\""
-        ]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=3).status==200 else 1)\""]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # --- WORKERS KAFKA ---
   llm_worker:
     build: ./services/llm_worker
     env_file: [.env]
@@ -160,7 +156,7 @@ services:
       KAFKA_TOPIC_RESP_OK: respuestas_llm_ok
       KAFKA_TOPIC_RESP_REINTENTAR: respuestas_llm_fallidas_reintentar
       URL_RESPONDER_LLM: http://responder-llm:8003/answer
-      MAX_RETRIES: 3
+      MAX_RETRIES: ${MAX_RETRIES:-3}
     depends_on:
       kafka:
         condition: service_healthy
@@ -175,24 +171,23 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC_RESP_REINTENTAR: respuestas_llm_fallidas_reintentar
       KAFKA_TOPIC_PREGUNTAS: preguntas_nuevas
-      RETRY_BASE_DELAY_S: 5
-      RETRY_MAX_DELAY_S: 60
+      RETRY_BASE_DELAY_S: ${RETRY_BASE_DELAY_S:-5}
+      RETRY_MAX_DELAY_S: ${RETRY_MAX_DELAY_S:-60}
     depends_on:
       kafka:
         condition: service_healthy
 
-  # --- SERVICIOS FLINK (CORREGIDOS) ---
+  # --- SERVICIOS FLINK ---
   jobmanager:
-    image: flink:1.17
+    image: flink:1.17 
     ports:
-      - "8081:8081"  # UI Web de Flink
-    command: jobmanager
+      - "8081:8081" 
+    command: jobmanager 
     environment:
-      JOB_MANAGER_RPC_ADDRESS: jobmanager
-      FLINK_PROPERTIES: |
-        jobmanager.memory.process.size: 1024m
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+      - FLINK_PROPERTIES=jobmanager.memory.process.size: 1024m
     depends_on:
-      kafka:
+      kafka: 
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
@@ -202,66 +197,65 @@ services:
 
   taskmanager:
     image: flink:1.17
-    command: taskmanager
+    command: taskmanager 
     environment:
-      JOB_MANAGER_RPC_ADDRESS: jobmanager
-      FLINK_PROPERTIES: |
-        taskmanager.memory.process.size: 1024m
+      - JOB_MANAGER_RPC_ADDRESS=jobmanager
+      - |
+        FLINK_PROPERTIES=taskmanager.memory.process.size: 1024m
         taskmanager.numberOfTaskSlots: 1
     depends_on:
-      jobmanager:
+      jobmanager: 
         condition: service_healthy
-      kafka:
+      kafka: 
         condition: service_healthy
+
+  # --- SUBMITTER JOB FLINK ---
   flink-job-submitter:
-    build: ./services/flink_job # Usa el Dockerfile que creamos para el job
+    build: ./services/flink_job
     environment:
-      # Pasa las mismas variables de entorno que necesita job.py
+      - PYTHONUNBUFFERED=1
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - KAFKA_TOPIC_RESP_OK=respuestas_llm_ok
       - KAFKA_TOPIC_VALIDADOS=resultados_validados
       - KAFKA_TOPIC_PREGUNTAS=preguntas_nuevas
       - URL_SCORER=http://scorer:8004/score
-      - SCORE_THRESHOLD=${SCORE_THRESHOLD:-0.1} # Puedes definirlo en .env o dejar default
-      - MAX_FLINK_RETRIES=${MAX_FLINK_RETRIES:-1} # Puedes definirlo en .env o dejar default
+      - SCORE_THRESHOLD=${SCORE_THRESHOLD:-0.1}
+      - MAX_FLINK_RETRIES=${MAX_FLINK_RETRIES:-1}
     depends_on:
-      jobmanager: # Debe esperar a que el jobmanager esté listo para recibir el job
+      jobmanager: 
         condition: service_healthy
-      taskmanager: # También esperar al taskmanager asegura que haya recursos
+      taskmanager: 
         condition: service_healthy
-      scorer: # El job llama al scorer, así que debe estar listo
+      scorer: 
          condition: service_healthy
-    command: > # Comando para enviar el job
+    command: >
       bash -c "
-        echo 'Esperando un poco más para que Flink se estabilice...' &&
+        echo 'Esperando a que Flink se estabilice...' &&
         sleep 15 &&
         echo 'Enviando el job PyFlink...' &&
         flink run \
           --python /opt/flink/job/job.py \
-          --jobmanager jobmanager:8081 # Dirección del JobManager
-        # El contenedor terminará después de enviar el job
+          --jobmanager jobmanager:8081
       "
-  # --- FIN SERVICIO SUBMITTER ---
-  # --- FIN SERVICIOS FLINK ---
 
+  # --- GENERADOR DE TRÁFICO (MODIFICADO T2) ---
   traffic-gen:
     build: ./services/traffic-gen
     env_file: [.env]
     environment:
       PYTHONUNBUFFERED: "1"
       TOTAL_REQUESTS: ${TOTAL_REQUESTS:-0}
-      DURATION_SECONDS: ${DURATION_SECONDS:-60}
       TRAFFIC_DIST: ${TRAFFIC_DIST:-poisson}
-      BASE_RATE_RPS: ${BASE_RATE_RPS:-10}
+      BASE_RATE_RPS: ${BASE_RATE_RPS:-5} 
+      DURATION_SECONDS: ${DURATION_SECONDS:-120}
       URL_STORAGE: http://storage-api:8001
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
       storage-api:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-      kafka-init:
-        condition: service_started
+      kafka-init: # Espera a que los tópicos estén creados
+        condition: service_started 
 
 volumes:
   pgdata:
+

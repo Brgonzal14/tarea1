@@ -1,16 +1,15 @@
-# Imagen base Python
-FROM python:3.11-slim
+# services/flink_job/Dockerfile
+FROM python:3.10-slim
 
-# Directorio de trabajo
 WORKDIR /opt/flink/job
 
-# Instalar dependencias necesarias para construir/ejecutar el job localmente si fuera necesario
-# y para que Flink las pueda usar al subir el job.
+# instala primero deps para cachear
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# preferimos wheels binarios para evitar compilaciones
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 
-# Copiar el script del job
+# copia tu job
 COPY job.py .
 
-# Nota: No hay CMD aquí. Esta imagen no se ejecuta como un servicio continuo.
-# Se usa para construir y potencialmente enviar el job a Flink.
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-u", "job.py"]
