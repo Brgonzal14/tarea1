@@ -1,30 +1,32 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Espera a que Kafka esté listo aceptando conexiones en el puerto 9092
-# El comando nc (netcat) intenta conectarse. El bucle espera hasta que tenga éxito.
-echo "Esperando a que Kafka esté disponible..."
-while ! nc -z kafka 9092; do
-  sleep 1
-done
-echo "Kafka está listo."
+# Permite sobreescribir el broker desde el entorno (útil si lo corres desde tu host)
+BROKER="${KAFKA_BROKER:-kafka:9092}"
+PARTITIONS="${PARTITIONS:-1}"
+REPLICATION="${REPLICATION:-1}"
 
-# Lista de tópicos a crear
-topics=(
+TOPICS=(
   "preguntas_nuevas"
   "respuestas_llm_ok"
   "respuestas_llm_fallidas_reintentar"
   "resultados_validados"
 )
 
-# Crear cada tópico
-for topic in "${topics[@]}"
-do
-  echo "Creando tópico: $topic"
+echo "Esperando a Kafka en ${BROKER}..."
+# Espera a que Kafka responda de verdad (no solo que abra el puerto)
+until kafka-topics --bootstrap-server "${BROKER}" --list >/dev/null 2>&1; do
+  sleep 2
+done
+echo "Kafka está listo."
+
+for topic in "${TOPICS[@]}"; do
+  echo "Creando tópico: ${topic}"
   kafka-topics --create --if-not-exists \
-    --bootstrap-server kafka:9092 \
-    --partitions 1 \
-    --replication-factor 1 \
-    --topic "$topic"
+    --bootstrap-server "${BROKER}" \
+    --topic "${topic}" \
+    --partitions "${PARTITIONS}" \
+    --replication-factor "${REPLICATION}"
 done
 
 echo "Creación de tópicos completada."
