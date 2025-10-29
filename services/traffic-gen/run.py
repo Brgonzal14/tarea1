@@ -1,236 +1,267 @@
-import os, asyncio, time, random
-import httpx # type: ignore
+import os
+import asyncio
+import time
+import random
+import json
+import httpx  # Para llamadas HTTP a storage-api
+from kafka import KafkaProducer # Cliente Kafka para Python
+from kafka.errors import KafkaError
 
-# ---------- Config ----------
-RUN_ID = os.getenv("RUN_ID", "dev1") + f"-{int(time.time())}"
+# ---------- Configuración ----------
+RUN_ID = os.getenv("RUN_ID", "dev-t2") + f"-{int(time.time())}" # Nuevo RUN_ID default
 BASE_RATE_RPS = float(os.getenv("BASE_RATE_RPS", "10"))
-DURATION_SECONDS = int(os.getenv("DURATION_SECONDS", "20"))
-TRAFFIC_DIST = os.getenv("TRAFFIC_DIST", "poisson").lower()  # poisson | bursty
-CACHE_TTL = int(os.getenv("CACHE_TTL_SECONDS", "21600"))
-TOTAL_REQUESTS = int(os.getenv("TOTAL_REQUESTS", "0"))  # si >0, corre por cantidad en vez de tiempo
+DURATION_SECONDS = int(os.getenv("DURATION_SECONDS", "60"))
+TRAFFIC_DIST = os.getenv("TRAFFIC_DIST", "poisson").lower()
+TOTAL_REQUESTS = int(os.getenv("TOTAL_REQUESTS", "0"))
 
 URL_STORAGE = os.getenv("URL_STORAGE", "http://storage-api:8001")
-URL_CACHE   = os.getenv("URL_CACHE",   "http://cache-service:8002")
-URL_LLM     = os.getenv("URL_LLM",     "http://responder-llm:8003")
-URL_SCORER  = os.getenv("URL_SCORER",  "http://scorer:8004")
+# URLs de LLM y Scorer ya no se usan directamente aquí
+# URL_CACHE = os.getenv("URL_CACHE", "http://cache-service:8002") # Podría usarse opcionalmente
 
-# Ajustes pensados para LLM real (Gemini)
-LLM_TIMEOUT_S   = int(os.getenv("LLM_TIMEOUT_S", "45"))      # lectura de respuesta
-LLM_RETRIES     = int(os.getenv("LLM_RETRIES", "2"))         # reintentos ante 429/5xx/timeout
-LLM_BACKOFF_S   = float(os.getenv("LLM_BACKOFF_S", "0.6"))   # backoff exponencial base
-MAX_INFLIGHT    = int(os.getenv("MAX_INFLIGHT", "20"))       # límite de peticiones simultáneas
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_TOPIC_PREGUNTAS = os.getenv("KAFKA_TOPIC_PREGUNTAS", "preguntas_nuevas")
 
-# Semáforo global para no saturar servicios (especialmente el LLM)
+# Límite de peticiones simultáneas (ahora aplica a consultas a storage-api + publicaciones a Kafka)
+MAX_INFLIGHT = int(os.getenv("MAX_INFLIGHT", "50")) # Podemos aumentar un poco el límite
 _sem = asyncio.Semaphore(MAX_INFLIGHT)
+
+# Contador simple para rastrear cuántas preguntas se publicaron
+published_count = 0
+skipped_count = 0
 
 print(f"[traffic-gen] RUN_ID={RUN_ID} dist={TRAFFIC_DIST} base_rps={BASE_RATE_RPS} "
       f"dur={DURATION_SECONDS}s total_requests={TOTAL_REQUESTS}")
+print(f"[traffic-gen] Conectando a Kafka: {KAFKA_BOOTSTRAP_SERVERS}")
+print(f"[traffic-gen] Publicando en tópico: {KAFKA_TOPIC_PREGUNTAS}")
+
+# ---------- Cliente Kafka Productor ----------
+# Se inicializa globalmente para reutilizar la conexión
+try:
+    producer = KafkaProducer(
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        # Serializador: convierte el diccionario Python a JSON bytes
+        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+        # Configuraciones para reintentos y esperas (ajustar según sea necesario)
+        acks='all', # Esperar confirmación de todos los brokers (en nuestro caso, 1)
+        retries=3,
+        retry_backoff_ms=100
+    )
+    print("[traffic-gen] Productor Kafka inicializado.")
+except KafkaError as e:
+    print(f"[traffic-gen][ERROR] No se pudo inicializar el productor Kafka: {e}")
+    # Si no podemos conectar a Kafka al inicio, salimos.
+    # Podríamos implementar reintentos aquí también.
+    producer = None # Marcar como no disponible
+
+
+# ---------- Lógica de Generación de Tráfico ----------
 
 def interarrival(rate_rps: float) -> float:
-    rate_rps = max(rate_rps, 0.001)
+    """Calcula el tiempo de espera entre llegadas para una tasa dada (Poisson)."""
+    rate_rps = max(rate_rps, 0.001) # Evitar división por cero
     return random.expovariate(rate_rps)
 
-async def _post_with_retries(client: httpx.AsyncClient, url: str, json: dict, timeout: float):
+async def check_question_processed(client: httpx.AsyncClient, question_id: int) -> bool:
     """
-    POST con reintentos y backoff (pensado para LLM/score).
-    Reintenta en 429/5xx o timeout de red.
+    Consulta a storage-api para ver si una pregunta ya tiene resultado.
+    ¡NECESITA UN NUEVO ENDPOINT EN STORAGE-API!
     """
-    delay = LLM_BACKOFF_S
-    last_exc = None
-    last_resp = None
-    for attempt in range(LLM_RETRIES + 1):
-        try:
-            resp = await client.post(url, json=json, timeout=timeout)
-            # Reintentar sólo si es 429 o 5xx
-            if resp.status_code == 429 or 500 <= resp.status_code < 600:
-                last_resp = resp
-                if attempt < LLM_RETRIES:
-                    await asyncio.sleep(delay)
-                    delay *= 2
-                    continue
-            return resp
-        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.NetworkError) as e:
-            last_exc = e
-            if attempt < LLM_RETRIES:
-                await asyncio.sleep(delay)
-                delay *= 2
-                continue
-            # sin más reintentos:
-            raise
-    # Si salimos por aquí, devolvemos lo último que tengamos o re-levantamos
-    if last_resp is not None:
-        return last_resp
-    if last_exc:
-        raise last_exc
+    try:
+        # Asumimos un nuevo endpoint /results/exists/{question_id}
+        # que devuelve 200 OK si existe, 404 Not Found si no existe.
+        check_url = f"{URL_STORAGE}/results/exists/{question_id}"
+        response = await client.get(check_url, timeout=5)
+        return response.status_code == 200
+    except httpx.RequestError as e:
+        print(f"[traffic-gen][WARN] Error al verificar pregunta {question_id}: {e}")
+        return False # Asumir que no existe si hay error de red
 
-async def warmup(client: httpx.AsyncClient):
-    print("[warmup] verificando servicios...")
-    checks = [
-        ("cache-health",   "GET",  f"{URL_CACHE}/health",   None, 10),
-        ("storage-random", "GET",  f"{URL_STORAGE}/questions/random", None, 10),
-        ("llm-health",     "GET",  f"{URL_LLM}/health",     None, 10),
-        ("scorer-health",  "GET",  f"{URL_SCORER}/health",  None, 10),
-    ]
-    for name, method, url, body, to in checks:
-        try:
-            if method == "GET":
-                r = await client.get(url, timeout=to)
-            else:
-                r = await client.post(url, json=body, timeout=to)
-            # Para el LLM mostramos el modo /GEMINI
-            if name == "llm-health":
-                try:
-                    mode = r.json().get("mode")
-                    print(f"[warmup] {name} {r.status_code} mode={mode}")
-                except Exception:
-                    print(f"[warmup] {name} {r.status_code}")
-            else:
-                print(f"[warmup] {name} {r.status_code}")
-        except Exception as e:
-            print(f"[warmup][ERROR] {name}: {e}")
+
+async def publish_to_kafka(question_data: dict):
+    """Publica un mensaje en el tópico de preguntas nuevas."""
+    global published_count
+    if not producer:
+        print("[traffic-gen][ERROR] Productor Kafka no disponible, saltando publicación.")
+        return
+
+    try:
+        # El productor es síncrono por defecto en sus métodos de envío,
+        # pero la librería maneja la E/S en background threads.
+        # get(timeout=10) espera la confirmación o lanza excepción.
+        future = producer.send(KAFKA_TOPIC_PREGUNTAS, value=question_data)
+        record_metadata = future.get(timeout=10) # Espera confirmación
+        # print(f"[traffic-gen] Pregunta {question_data.get('question_id')} publicada en partición {record_metadata.partition}")
+        published_count += 1
+    except KafkaError as e:
+        print(f"[traffic-gen][ERROR] Error al publicar en Kafka: {e}")
+    except Exception as e:
+        print(f"[traffic-gen][ERROR] Error inesperado al publicar: {e}")
 
 async def one_request(client: httpx.AsyncClient, idx: int):
+    """
+    Obtiene una pregunta, verifica si ya fue procesada, y si no, la publica en Kafka.
+    """
+    global skipped_count
     async with _sem:
         t0 = time.perf_counter()
-        is_hit = False
-        llm_answer = None
-        score = None
 
-        # 1) Pregunta al storage
+        # 1) Obtener pregunta aleatoria del storage
         try:
             r_q = await client.get(f"{URL_STORAGE}/questions/random", timeout=10)
             if r_q.status_code != 200:
                 print(f"[req {idx}] /questions/random status={r_q.status_code}")
                 return
-            q = r_q.json()
-            qid = q["question_id"]
-            key = f"q:{qid}"
+            q_data = r_q.json() # Esperamos {"question_id": N, "question": "...", "best_answer": "..."}
+            qid = q_data.get("question_id")
+            if not qid:
+                 print(f"[req {idx}][ERROR] Respuesta de /questions/random sin question_id")
+                 return
         except Exception as e:
-            print(f"[req {idx}][ERROR] /questions/random:", e)
+            print(f"[req {idx}][ERROR] /questions/random: {e}")
             return
 
-        # 2) Intento de cache GET
-        try:
-            r_cache = await client.get(f"{URL_CACHE}/cache/{key}", timeout=5)
-            is_hit = (r_cache.status_code == 200)
-            print(f"[req {idx}] cache GET {r_cache.status_code} hit={is_hit}")
-        except Exception as e:
-            is_hit = False
-            print(f"[req {idx}][WARN] cache GET:", e)
+        # 2) Verificar si la pregunta ya fue procesada (consultando storage-api)
+        already_processed = await check_question_processed(client, qid)
 
-        # 3) Miss -> LLM + scorer + cache PUT
-        if not is_hit:
-            try:
-                r_llm = await _post_with_retries(
-                    client,
-                    f"{URL_LLM}/answer",
-                    json={"question": q["question"]},
-                    timeout=LLM_TIMEOUT_S
-                )
-                print(f"[req {idx}] llm /answer {r_llm.status_code}")
-                if r_llm.status_code != 200:
-                    # si el LLM falla, no seguimos con scorer/PUT
-                    try:
-                        body_txt = r_llm.text[:200]
-                    except Exception:
-                        body_txt = "<no-body>"
-                    print(f"[req {idx}][ERROR] LLM body: {body_txt}")
-                    return
-                llm_answer = r_llm.json().get("answer", "")
-            except Exception as e:
-                print(f"[req {idx}][ERROR] LLM /answer:", e)
-                return
-
-            try:
-                r_sc = await _post_with_retries(
-                    client,
-                    f"{URL_SCORER}/score",
-                    json={"gold_answer": q["best_answer"], "llm_answer": llm_answer},
-                    timeout=15
-                )
-                score = r_sc.json().get("score", 0.0)
-                print(f"[req {idx}] scorer /score {r_sc.status_code} score={score}")
-            except Exception as e:
-                print(f"[req {idx}][ERROR] scorer /score:", e)
-                return
-
-            try:
-                r_put = await client.put(
-                    f"{URL_CACHE}/cache/{key}",
-                    json={"value": {"answer": llm_answer, "score": score}, "ttl_seconds": CACHE_TTL},
-                    timeout=5
-                )
-                print(f"[req {idx}] cache PUT {r_put.status_code}")
-            except Exception as e:
-                print(f"[req {idx}][WARN] cache PUT:", e)
+        if already_processed:
+            # Si ya existe, la saltamos (simula la "respuesta encontrada" del diagrama T2)
+            # print(f"[req {idx}] Pregunta {qid} ya procesada, saltando.")
+            skipped_count += 1
+        else:
+            # 3) Si no existe, publicar en Kafka para procesamiento asíncrono
+            #    Añadimos retry_count para futuro manejo de reintentos
+            message_to_send = {
+                "question_id": qid,
+                "question_text": q_data.get("question", ""),
+                "best_answer": q_data.get("best_answer", ""), # Necesario para el scorer después
+                "retry_count": 0
+            }
+            # La publicación a Kafka puede bloquear brevemente, pero es manejado por la librería
+            await publish_to_kafka(message_to_send)
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
+        # Opcional: Podríamos registrar esta latencia (de generar/verificar/publicar)
+        # print(f"[req {idx}] Procesado en {latency_ms}ms. Publicado: {not already_processed}")
 
-        # 4) Registrar resultado
-        try:
-            r_res = await client.post(
-                f"{URL_STORAGE}/result",
-                json={
-                    "run_id": RUN_ID,
-                    "question_id": qid,
-                    "is_cache_hit": is_hit,
-                    "llm_answer": None if is_hit else llm_answer,
-                    "score": None if is_hit else score,
-                    "latency_ms": latency_ms
-                },
-                timeout=10
-            )
-            print(f"[req {idx}] result POST {r_res.status_code} latency_ms={latency_ms}")
-        except Exception as e:
-            print(f"[req {idx}][WARN] POST /result:", e)
 
 async def loop_time(client: httpx.AsyncClient):
-    print(f"[loop] time-based for {DURATION_SECONDS}s")
-    end = time.monotonic() + DURATION_SECONDS
+    """Bucle principal basado en tiempo."""
+    print(f"[loop] Iniciando generación basada en tiempo por {DURATION_SECONDS}s...")
+    start_time = time.monotonic()
+    end_time = start_time + DURATION_SECONDS
     tasks = []
     i = 0
-    if TRAFFIC_DIST == "bursty":
-        high = BASE_RATE_RPS * 3
-        low  = max(BASE_RATE_RPS * 0.2, 0.1)
-        current = high
-        next_swap = time.monotonic() + 5.0
 
-    while time.monotonic() < end:
+    # Lógica para distribución 'bursty' (igual que antes)
+    is_bursty = (TRAFFIC_DIST == "bursty")
+    if is_bursty:
+        high_rate = BASE_RATE_RPS * 3
+        low_rate = max(BASE_RATE_RPS * 0.2, 0.1)
+        current_rate = high_rate
+        swap_interval = 5.0 # segundos
+        next_swap_time = start_time + swap_interval
+        print(f"[loop] Modo Bursty: alternando entre {high_rate:.1f} RPS y {low_rate:.1f} RPS cada {swap_interval}s.")
+
+    while time.monotonic() < end_time:
         i += 1
-        tasks.append(asyncio.create_task(one_request(client, i)))
-        if TRAFFIC_DIST == "poisson":
-            await asyncio.sleep(interarrival(BASE_RATE_RPS))
-        else:
-            await asyncio.sleep(interarrival(current))
-            if time.monotonic() >= next_swap:
-                current = high if current == low else low
-                next_swap = time.monotonic() + 5.0
+        # Crea la tarea para procesar una solicitud
+        task = asyncio.create_task(one_request(client, i))
+        tasks.append(task)
+        # task.add_done_callback(lambda t: tasks.remove(t)) # Opcional: limpiar lista
 
+        # Calcular tiempo de espera para la siguiente petición
+        if is_bursty:
+            # Ajustar tasa si es momento de cambiar
+            if time.monotonic() >= next_swap_time:
+                current_rate = high_rate if current_rate == low_rate else low_rate
+                next_swap_time += swap_interval
+                # print(f"[loop] Bursty swap: nueva tasa = {current_rate:.1f} RPS")
+            wait_time = interarrival(current_rate)
+        else: # Poisson
+            wait_time = interarrival(BASE_RATE_RPS)
+
+        await asyncio.sleep(wait_time)
+
+    print(f"[loop] Tiempo de generación ({DURATION_SECONDS}s) completado.")
+    print("[loop] Esperando a que las tareas pendientes finalicen...")
+    # Esperar a que todas las tareas lanzadas terminen
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    print("[loop] done (time).")
+        # Usamos wait para manejar timeouts si alguna tarea se queda pegada
+        done, pending = await asyncio.wait(tasks, timeout=60) # Timeout de 60s extra
+        if pending:
+             print(f"[loop][WARN] {len(pending)} tareas no finalizaron después del timeout.")
+             for task in pending:
+                 task.cancel() # Intentar cancelar las tareas pendientes
+    print("[loop] Todas las tareas finalizadas.")
+
 
 async def loop_count(client: httpx.AsyncClient, n: int):
-    print(f"[loop] starting {n} requests…")
-    for i in range(1, max(n, 1) + 1):
-        await one_request(client, i)
-    print("[loop] done (count).")
+    """Bucle principal basado en número de peticiones (menos común para simulación)."""
+    print(f"[loop] Iniciando {n} peticiones...")
+    tasks = []
+    # Lanzar todas las tareas (controlado por el semáforo)
+    for i in range(1, n + 1):
+         tasks.append(asyncio.create_task(one_request(client, i)))
+
+    print(f"[loop] {n} tareas creadas. Esperando finalización...")
+    if tasks:
+        done, pending = await asyncio.wait(tasks, timeout=n*2 + 60) # Timeout generoso
+        if pending:
+             print(f"[loop][WARN] {len(pending)} tareas no finalizaron después del timeout.")
+             for task in pending:
+                 task.cancel()
+    print("[loop] Todas las tareas finalizadas.")
+
 
 async def main():
-    # timeouts por defecto del cliente (se pueden sobreescribir por llamada)
-    timeout = httpx.Timeout(connect=5.0, read=LLM_TIMEOUT_S, write=10.0, pool=LLM_TIMEOUT_S)
+    # Timeouts por defecto del cliente httpx (para storage-api)
+    timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=None) # Pool None puede ser mejor para muchas requests cortas
+
+    # Asegurarse que el productor Kafka esté listo
+    if not producer:
+        print("[main][FATAL] No se pudo conectar a Kafka. Abortando.")
+        return
+
     async with httpx.AsyncClient(timeout=timeout) as client:
-        await warmup(client)
+        # Warmup (opcional, verifica dependencias)
+        # await warmup(client) # Podemos simplificar o quitar warmup ahora
+
+        # Ejecutar el bucle principal
         if TOTAL_REQUESTS > 0:
             await loop_count(client, TOTAL_REQUESTS)
         else:
             await loop_time(client)
 
-        try:
-            r = await client.get(f"{URL_STORAGE}/metrics", params={"run_id": RUN_ID}, timeout=10)
-            print("[metrics]", r.json())
-        except Exception as e:
-            print("[metrics][WARN]", e)
+        # Imprimir resumen
+        print("-" * 30)
+        print(f"Resumen de la Corrida {RUN_ID}:")
+        print(f"  Preguntas Publicadas en Kafka: {published_count}")
+        print(f"  Preguntas Saltadas (ya procesadas): {skipped_count}")
+        total_intentos = published_count + skipped_count
+        print(f"  Total de Intentos: {total_intentos}")
+        if total_intentos > 0:
+             print(f"  Tasa de Publicación (nuevas / total): {(published_count / total_intentos) * 100:.2f}%")
+        print("-" * 30)
+
+    # Cerrar el productor Kafka al final
+    if producer:
+        print("[main] Cerrando productor Kafka...")
+        producer.flush() # Asegura que todos los mensajes pendientes se envíen
+        producer.close()
+        print("[main] Productor Kafka cerrado.")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[main] Ejecución interrumpida por el usuario.")
+        # Intentar cerrar el productor si existe
+        if producer:
+            print("[main] Intentando cerrar productor Kafka...")
+            try:
+                producer.flush(timeout=5)
+                producer.close(timeout=5)
+                print("[main] Productor Kafka cerrado.")
+            except Exception as e:
+                print(f"[main][WARN] Error al cerrar productor Kafka: {e}")

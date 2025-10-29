@@ -11,9 +11,9 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB}"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7
@@ -22,9 +22,62 @@ services:
               "--maxmemory-policy", "${REDIS_POLICY}"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- NUEVOS SERVICIOS PARA TAREA 2 ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ['CMD', 'bash', '-c', "echo 'ruok' | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      # PLAINTEXT: Puerto interno (kafka:9092), PLAINTEXT_INTERNAL: Puerto externo (localhost:29092)
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Configuraciones específicas de Confluent para factor de replicación 1
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ['CMD', 'bash', '-c', 'kafka-topics --bootstrap-server kafka:9092 --list']
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  retry_worker:
+    build: ./services/retry_worker # Indica dónde encontrar el Dockerfile
+    env_file: [.env]              # Carga variables generales como GEMINI_API_KEY si fueran necesarias
+    environment:
+      PYTHONUNBUFFERED: "1"       # Para que los logs aparezcan inmediatamente
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092 # Dirección del broker Kafka
+      KAFKA_TOPIC_RESP_REINTENTAR: respuestas_llm_fallidas_reintentar # Tópico del que consume
+      KAFKA_TOPIC_PREGUNTAS: preguntas_nuevas # Tópico al que republica
+      RETRY_BASE_DELAY_S: 5       # Tiempo base de espera (5 segundos)
+      RETRY_MAX_DELAY_S: 60       # Tiempo máximo de espera (60 segundos)
+    depends_on:
+      kafka:
+        condition: service_healthy # Asegura que Kafka esté listo antes de iniciar
+  # --- FIN NUEVOS SERVICIOS ---
 
   storage-api:
     build: ./services/storage-api
@@ -32,16 +85,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka: # Necesita esperar a Kafka para consumir resultados validados
+        condition: service_healthy
     ports:
       - "8001:8001"
     volumes:
       - ./data:/data:ro
     healthcheck:
-      # chequea /health interno
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=2).status==200 else 1)\""]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   cache-service:
     build: ./services/cache-service
@@ -52,59 +106,60 @@ services:
     ports:
       - "8002:8002"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=2).status==200 else 1)\""]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   responder-llm:
     build: ./services/responder-llm
     env_file: [.env]
     environment:
-      # --- LLM config (forzamos inglés y Gemini v1) ---
       LLM_MODE: GEMINI
-      LLM_LANG: en                # << respuestas en inglés
+      LLM_LANG: en
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: gemini-2.5-flash
-      GEMINI_API_VERSION: v1
+      GEMINI_API_VERSION: v1beta
+    depends_on:
+      {} # No tiene dependencias directas al iniciar
     ports:
       - "8003:8003"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=2).status==200 else 1)\""]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   scorer:
     build: ./services/scorer
     env_file: [.env]
+    depends_on:
+      {} # No tiene dependencias directas al iniciar
     ports:
       - "8004:8004"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=2).status==200 else 1)\""]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # --- MODIFICADO PARA TAREA 2 ---
   traffic-gen:
     build: ./services/traffic-gen
     env_file: [.env]
     environment:
-      PYTHONUNBUFFERED: "1"   # logs al instante
-      TOTAL_REQUESTS: ${TOTAL_REQUESTS:-1000}
+      PYTHONUNBUFFERED: "1"
+      TOTAL_REQUESTS: ${TOTAL_REQUESTS:-0}
       TRAFFIC_DIST: ${TRAFFIC_DIST:-poisson}
-      BASE_RATE_RPS: ${BASE_RATE_RPS:-20}
-      DURATION_SECONDS: ${DURATION_SECONDS:-50}
-      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-21600}
+      BASE_RATE_RPS: ${BASE_RATE_RPS:-10}
+      DURATION_SECONDS: ${DURATION_SECONDS:-60}
+      URL_STORAGE: http://storage-api:8001
+      URL_CACHE: http://cache-service:8002
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092 # Dirección interna de Kafka
     depends_on:
       storage-api:
         condition: service_healthy
-      cache-service:
-        condition: service_healthy
-      responder-llm:
-        condition: service_healthy
-      scorer:
+      kafka: # Necesita publicar las preguntas nuevas
         condition: service_healthy
 
 volumes:
