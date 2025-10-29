@@ -1,4 +1,6 @@
+
 services:
+  # Este servicio corre Postgres 16 para persistencia de resultados del flujo validado.
   postgres:
     image: postgres:16
     environment:
@@ -15,6 +17,7 @@ services:
       timeout: 5s
       retries: 5
 
+  # Este servicio expone Redis 7 como caché/kv auxiliar para el proyecto.
   redis:
     image: redis:7
     command: ["redis-server", "--save", "", "--appendonly", "no",
@@ -26,18 +29,19 @@ services:
       timeout: 5s
       retries: 5
 
-  # --- SERVICIOS KAFKA ---
+  # Este servicio provee ZooKeeper requerido por cp-kafka 7.3.x.
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.2
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     healthcheck:
-      test: ['CMD', 'bash', '-c', "echo 'ruok' | nc localhost 2181"]
+      test: ['CMD', 'bash', '-c', "echo ruok | nc localhost 2181"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # Este servicio levanta Kafka con listeners interno (9092) y externo (29092).
   kafka:
     image: confluentinc/cp-kafka:7.3.2
     depends_on:
@@ -45,9 +49,12 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Define listeners y su mapeo de protocolo (interno y externo).
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:29092
+      # Ajustes single-node para fines de laboratorio.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
@@ -62,6 +69,7 @@ services:
       timeout: 10s
       retries: 5
 
+  # Este servicio inicializa los tópicos del proyecto y queda durmiendo.
   kafka-init:
     image: confluentinc/cp-kafka:7.3.2
     depends_on:
@@ -71,23 +79,23 @@ services:
       - ./create_topics.sh:/tmp/create_topics.sh
     command: bash -c "/tmp/create_topics.sh && echo 'Tópicos creados, durmiendo...' && sleep infinity"
 
-  # --- SERVICIOS APLICACIÓN ---
+  # Este servicio expone la API de almacenamiento y corre el consumidor de Kafka en background.
   storage-api:
-    build: ./services/storage-api
+    build:
+      context: ./services/storage-api
+      # Si el Dockerfile no se llama "Dockerfile" (por ejemplo "dockerfile"), se declara aquí:
+      # dockerfile: dockerfile
     env_file: [.env]
-    # --- MODIFICACIÓN T2: Añadir variables de entorno ---
     environment:
       PYTHONUNBUFFERED: "1"
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC_VALIDADOS: resultados_validados
       KAFKA_CONSUMER_GROUP_STORAGE: storage_consumer_group
-      # Pasa el RUN_ID para que el consumidor sepa dónde guardar los resultados
       RUN_ID: ${RUN_ID:-dev_t2}
-    # --- FIN MODIFICACIÓN ---
     depends_on:
       postgres:
         condition: service_healthy
-      kafka: 
+      kafka:
         condition: service_healthy
     ports:
       - "8001:8001"
@@ -99,8 +107,10 @@ services:
       timeout: 5s
       retries: 5
 
+  # Este servicio expone un microservicio de caché HTTP apoyado en Redis.
   cache-service:
-    build: ./services/cache-service
+    build:
+      context: ./services/cache-service
     env_file: [.env]
     depends_on:
       redis:
@@ -113,8 +123,12 @@ services:
       timeout: 5s
       retries: 5
 
+  # Este servicio ofrece la API del LLM (stub o GEMINI) para que el worker consulte respuestas.
   responder-llm:
-    build: ./services/responder-llm
+    build:
+      context: ./services/responder-llm
+      # Si el Dockerfile se llama "dockerfile" (minúsculas), se habilita la línea siguiente.
+      # dockerfile: dockerfile
     env_file: [.env]
     environment:
       LLM_MODE: GEMINI
@@ -122,8 +136,6 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: gemini-2.5-flash
       GEMINI_API_VERSION: v1beta
-    depends_on:
-      {} 
     ports:
       - "8003:8003"
     healthcheck:
@@ -132,11 +144,11 @@ services:
       timeout: 5s
       retries: 5
 
+  # Este servicio calcula el score de las respuestas y expone /score para Flink.
   scorer:
-    build: ./services/scorer
+    build:
+      context: ./services/scorer
     env_file: [.env]
-    depends_on:
-      {} 
     ports:
       - "8004:8004"
     healthcheck:
@@ -145,9 +157,10 @@ services:
       timeout: 5s
       retries: 5
 
-  # --- WORKERS KAFKA ---
+  # Este servicio consume preguntas, llama al LLM y publica en respuestas_ok o reintentar.
   llm_worker:
-    build: ./services/llm_worker
+    build:
+      context: ./services/llm_worker
     env_file: [.env]
     environment:
       PYTHONUNBUFFERED: "1"
@@ -162,9 +175,13 @@ services:
         condition: service_healthy
       responder-llm:
         condition: service_healthy
+      kafka-init:
+        condition: service_started
 
+  # Este servicio reinyecta mensajes según política de backoff y límites.
   retry_worker:
-    build: ./services/retry_worker
+    build:
+      context: ./services/retry_worker
     env_file: [.env]
     environment:
       PYTHONUNBUFFERED: "1"
@@ -176,86 +193,95 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_started
 
-  # --- SERVICIOS FLINK ---
+  # Este servicio levanta el JobManager de Flink (1.17 con PyFlink).
   jobmanager:
-    image: flink:1.17 
+    build: ./docker/flink-py
+    command: jobmanager  
+    image: apache/flink:1.17.1-python3.11
     ports:
-      - "8081:8081" 
-    command: jobmanager 
+      - "8081:8081"
     environment:
-      - JOB_MANAGER_RPC_ADDRESS=jobmanager
-      - FLINK_PROPERTIES=jobmanager.memory.process.size: 1024m
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 3
     depends_on:
-      kafka: 
+      kafka:
         condition: service_healthy
+    volumes:
+      - ./jars/flink-sql-connector-kafka-1.17.1.jar:/opt/flink/opt/flink-sql-connector-kafka-1.17.1.jar:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
+      test: ["CMD-SHELL","curl -f http://localhost:8081/overview || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
 
+  # Este servicio levanta el TaskManager de Flink.
   taskmanager:
-    image: flink:1.17
-    command: taskmanager 
+    build: ./docker/flink-py
+    command: taskmanager  
+    image: apache/flink:1.17.1-python3.11
     environment:
-      - JOB_MANAGER_RPC_ADDRESS=jobmanager
-      - |
-        FLINK_PROPERTIES=taskmanager.memory.process.size: 1024m
+       - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 1
+        taskmanager.memory.process.size: 1024m
     depends_on:
-      jobmanager: 
+      jobmanager:
         condition: service_healthy
-      kafka: 
-        condition: service_healthy
-
-  # --- SUBMITTER JOB FLINK ---
+      kafka:
+        condition: service_healthy  # <-- corregido el typo (antes decía service_health)
+    volumes:
+      - ./jars/flink-sql-connector-kafka-1.17.1.jar:/opt/flink/opt/flink-sql-connector-kafka-1.17.1.jar:ro
+  # Este servicio instala deps del job PyFlink, espera, y hace el submit al JobManager.
+    # Este servicio instala dependencias del job PyFlink y hace el submit al JobManager.
   flink-job-submitter:
-    build: ./services/flink_job
-    environment:
-      - PYTHONUNBUFFERED=1
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - KAFKA_TOPIC_RESP_OK=respuestas_llm_ok
-      - KAFKA_TOPIC_VALIDADOS=resultados_validados
-      - KAFKA_TOPIC_PREGUNTAS=preguntas_nuevas
-      - URL_SCORER=http://scorer:8004/score
-      - SCORE_THRESHOLD=${SCORE_THRESHOLD:-0.1}
-      - MAX_FLINK_RETRIES=${MAX_FLINK_RETRIES:-1}
+    build: ./docker/flink-py
     depends_on:
-      jobmanager: 
+      jobmanager:
         condition: service_healthy
-      taskmanager: 
+      taskmanager:
+        condition: service_started
+      scorer:
         condition: service_healthy
-      scorer: 
-         condition: service_healthy
-    command: >
-      bash -c "
-        echo 'Esperando a que Flink se estabilice...' &&
-        sleep 15 &&
-        echo 'Enviando el job PyFlink...' &&
-        flink run \
-          --python /opt/flink/job/job.py \
-          --jobmanager jobmanager:8081
-      "
-
-  # --- GENERADOR DE TRÁFICO (MODIFICADO T2) ---
-  traffic-gen:
-    build: ./services/traffic-gen
-    env_file: [.env]
+    volumes:
+      - ./jars/flink-sql-connector-kafka-1.17.1.jar:/opt/flink/opt/flink-sql-connector-kafka-1.17.1.jar:ro
+      - ./services/flink_job:/job:ro
     environment:
       PYTHONUNBUFFERED: "1"
-      TOTAL_REQUESTS: ${TOTAL_REQUESTS:-0}
-      TRAFFIC_DIST: ${TRAFFIC_DIST:-poisson}
-      BASE_RATE_RPS: ${BASE_RATE_RPS:-5} 
-      DURATION_SECONDS: ${DURATION_SECONDS:-120}
-      URL_STORAGE: http://storage-api:8001
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    command:
+      - /bin/bash
+      - -lc
+      - >
+        echo "[submitter] Copiando submit.sh a /tmp y normalizando CRLF…";
+        awk '{ sub(/\r$/,""); print }' /job/submit.sh > /tmp/submit.sh;
+        chmod +x /tmp/submit.sh;
+        /bin/bash /tmp/submit.sh
+  # Este servicio genera tráfico (Poisson/bursty) hacia preguntas_nuevas.
+  traffic-gen:
+    build:
+      context: ./services/traffic-gen
     depends_on:
+      kafka:
+        condition: service_healthy
       storage-api:
         condition: service_healthy
-      kafka-init: # Espera a que los tópicos estén creados
-        condition: service_started 
+    environment:
+      RUN_ID: "t2-smoke"
+      BASE_RATE_RPS: "5"
+      DURATION_SECONDS: "30"
+      TOTAL_REQUESTS: "0"
+      TRAFFIC_DIST: "poisson"
+      MAX_CONCURRENCY: "64"
+      HTTP_TIMEOUT: "5"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_TOPIC_PREGUNTAS: "preguntas_nuevas"
+      URL_STORAGE: "http://storage-api:8001"
+    restart: "no"
 
 volumes:
   pgdata:
-

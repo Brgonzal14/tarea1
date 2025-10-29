@@ -9,6 +9,14 @@ from pyflink.datastream.formats.json import JsonRowDeserializationSchema, JsonRo
 from pyflink.common.typeinfo import Types
 from pyflink.datastream.functions import MapFunction, FilterFunction, ProcessFunction
 from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common import Configuration
+from pyflink.datastream import StreamExecutionEnvironment
+
+conf = Configuration()
+conf.set_string("pipeline.jars",
+                "file:///opt/flink/opt/flink-sql-connector-kafka-1.17.1.jar")
+env = StreamExecutionEnvironment.get_execution_environment(conf)
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger("flink_job")

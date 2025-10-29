@@ -5,6 +5,8 @@ import httpx
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
 import logging
+import asyncio
+
 
 # Configuración de Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
