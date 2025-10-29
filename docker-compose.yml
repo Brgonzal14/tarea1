@@ -17,16 +17,19 @@ services:
 
   redis:
     image: redis:7
-    command: ["redis-server", "--save", "", "--appendonly", "no",
-              "--maxmemory", "${REDIS_MAXMEMORY}",
-              "--maxmemory-policy", "${REDIS_POLICY}"]
+    command:
+      [
+        "redis-server",
+        "--save", "", "--appendonly", "no",
+        "--maxmemory", "${REDIS_MAXMEMORY}",
+        "--maxmemory-policy", "${REDIS_POLICY}"
+      ]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # --- NUEVOS SERVICIOS PARA TAREA 2 ---
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.2
     environment:
@@ -45,13 +48,11 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      # PLAINTEXT: Puerto interno (kafka:9092), PLAINTEXT_INTERNAL: Puerto externo (localhost:29092)
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:29092
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_INTERNAL://localhost:29092"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      # Configuraciones específicas de Confluent para factor de replicación 1
       KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -64,20 +65,14 @@ services:
       timeout: 10s
       retries: 5
 
-  retry_worker:
-    build: ./services/retry_worker # Indica dónde encontrar el Dockerfile
-    env_file: [.env]              # Carga variables generales como GEMINI_API_KEY si fueran necesarias
-    environment:
-      PYTHONUNBUFFERED: "1"       # Para que los logs aparezcan inmediatamente
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092 # Dirección del broker Kafka
-      KAFKA_TOPIC_RESP_REINTENTAR: respuestas_llm_fallidas_reintentar # Tópico del que consume
-      KAFKA_TOPIC_PREGUNTAS: preguntas_nuevas # Tópico al que republica
-      RETRY_BASE_DELAY_S: 5       # Tiempo base de espera (5 segundos)
-      RETRY_MAX_DELAY_S: 60       # Tiempo máximo de espera (60 segundos)
+  kafka-init:
+    image: confluentinc/cp-kafka:7.3.2
     depends_on:
       kafka:
-        condition: service_healthy # Asegura que Kafka esté listo antes de iniciar
-  # --- FIN NUEVOS SERVICIOS ---
+        condition: service_healthy
+    volumes:
+      - ./create_topics.sh:/tmp/create_topics.sh
+    command: ["bash", "-c", "sleep 10 && bash /tmp/create_topics.sh && sleep infinity"]
 
   storage-api:
     build: ./services/storage-api
@@ -85,14 +80,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      kafka: # Necesita esperar a Kafka para consumir resultados validados
+      kafka:
         condition: service_healthy
     ports:
       - "8001:8001"
     volumes:
       - ./data:/data:ro
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=3).status==200 else 1)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=3).status==200 else 1)\""
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -106,7 +105,11 @@ services:
     ports:
       - "8002:8002"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=3).status==200 else 1)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health', timeout=3).status==200 else 1)\""
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -120,12 +123,14 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: gemini-2.5-flash
       GEMINI_API_VERSION: v1beta
-    depends_on:
-      {} # No tiene dependencias directas al iniciar
     ports:
       - "8003:8003"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=3).status==200 else 1)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8003/health', timeout=3).status==200 else 1)\""
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -133,34 +138,130 @@ services:
   scorer:
     build: ./services/scorer
     env_file: [.env]
-    depends_on:
-      {} # No tiene dependencias directas al iniciar
     ports:
       - "8004:8004"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=3).status==200 else 1)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8004/health', timeout=3).status==200 else 1)\""
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # --- MODIFICADO PARA TAREA 2 ---
+  llm_worker:
+    build: ./services/llm_worker
+    env_file: [.env]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_PREGUNTAS: preguntas_nuevas
+      KAFKA_TOPIC_RESP_OK: respuestas_llm_ok
+      KAFKA_TOPIC_RESP_REINTENTAR: respuestas_llm_fallidas_reintentar
+      URL_RESPONDER_LLM: http://responder-llm:8003/answer
+      MAX_RETRIES: 3
+    depends_on:
+      kafka:
+        condition: service_healthy
+      responder-llm:
+        condition: service_healthy
+
+  retry_worker:
+    build: ./services/retry_worker
+    env_file: [.env]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_RESP_REINTENTAR: respuestas_llm_fallidas_reintentar
+      KAFKA_TOPIC_PREGUNTAS: preguntas_nuevas
+      RETRY_BASE_DELAY_S: 5
+      RETRY_MAX_DELAY_S: 60
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # --- SERVICIOS FLINK (CORREGIDOS) ---
+  jobmanager:
+    image: flink:1.17
+    ports:
+      - "8081:8081"  # UI Web de Flink
+    command: jobmanager
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      FLINK_PROPERTIES: |
+        jobmanager.memory.process.size: 1024m
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  taskmanager:
+    image: flink:1.17
+    command: taskmanager
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      FLINK_PROPERTIES: |
+        taskmanager.memory.process.size: 1024m
+        taskmanager.numberOfTaskSlots: 1
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+  flink-job-submitter:
+    build: ./services/flink_job # Usa el Dockerfile que creamos para el job
+    environment:
+      # Pasa las mismas variables de entorno que necesita job.py
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC_RESP_OK=respuestas_llm_ok
+      - KAFKA_TOPIC_VALIDADOS=resultados_validados
+      - KAFKA_TOPIC_PREGUNTAS=preguntas_nuevas
+      - URL_SCORER=http://scorer:8004/score
+      - SCORE_THRESHOLD=${SCORE_THRESHOLD:-0.1} # Puedes definirlo en .env o dejar default
+      - MAX_FLINK_RETRIES=${MAX_FLINK_RETRIES:-1} # Puedes definirlo en .env o dejar default
+    depends_on:
+      jobmanager: # Debe esperar a que el jobmanager esté listo para recibir el job
+        condition: service_healthy
+      taskmanager: # También esperar al taskmanager asegura que haya recursos
+        condition: service_healthy
+      scorer: # El job llama al scorer, así que debe estar listo
+         condition: service_healthy
+    command: > # Comando para enviar el job
+      bash -c "
+        echo 'Esperando un poco más para que Flink se estabilice...' &&
+        sleep 15 &&
+        echo 'Enviando el job PyFlink...' &&
+        flink run \
+          --python /opt/flink/job/job.py \
+          --jobmanager jobmanager:8081 # Dirección del JobManager
+        # El contenedor terminará después de enviar el job
+      "
+  # --- FIN SERVICIO SUBMITTER ---
+  # --- FIN SERVICIOS FLINK ---
+
   traffic-gen:
     build: ./services/traffic-gen
     env_file: [.env]
     environment:
       PYTHONUNBUFFERED: "1"
       TOTAL_REQUESTS: ${TOTAL_REQUESTS:-0}
+      DURATION_SECONDS: ${DURATION_SECONDS:-60}
       TRAFFIC_DIST: ${TRAFFIC_DIST:-poisson}
       BASE_RATE_RPS: ${BASE_RATE_RPS:-10}
-      DURATION_SECONDS: ${DURATION_SECONDS:-60}
       URL_STORAGE: http://storage-api:8001
-      URL_CACHE: http://cache-service:8002
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092 # Dirección interna de Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
       storage-api:
         condition: service_healthy
-      kafka: # Necesita publicar las preguntas nuevas
+      kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_started
 
 volumes:
   pgdata:
