@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Permite sobreescribir el broker desde el entorno (útil si lo corres desde tu host)
+# Permite sobreescribir el broker desde el entorno 
 BROKER="${KAFKA_BROKER:-kafka:9092}"
 PARTITIONS="${PARTITIONS:-1}"
 REPLICATION="${REPLICATION:-1}"
@@ -14,7 +14,7 @@ TOPICS=(
 )
 
 echo "Esperando a Kafka en ${BROKER}..."
-# Espera a que Kafka responda de verdad (no solo que abra el puerto)
+# Espera a que Kafka responda 
 until kafka-topics --bootstrap-server "${BROKER}" --list >/dev/null 2>&1; do
   sleep 2
 done

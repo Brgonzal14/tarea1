@@ -52,7 +52,8 @@ def inicializar_kafka_clients():
                 # Deserializador: convierte JSON bytes a diccionario Python
                 value_deserializer=lambda v: json.loads(v.decode('utf-8')),
                 auto_offset_reset='earliest', # Empieza a leer desde el principio si es un grupo nuevo
-                consumer_timeout_ms=-1 # Espera indefinidamente por nuevos mensajes
+                consumer_timeout_ms=-1, # Espera indefinidamente por nuevos mensajes
+                max_poll_interval_ms=300000
             )
             log.info("Consumidor Kafka inicializado.")
 
@@ -150,25 +151,20 @@ async def procesar_mensajes():
                     publicar_mensaje(KAFKA_TOPIC_RESP_OK, mensaje_ok)
                 except Exception as e:
                     log.error(f"Error al procesar respuesta exitosa del LLM para QID {qid}: {e}")
-                    # Podríamos enviar a un tópico de error permanente aquí
+                    
 
             elif status_code in [429, 500, 502, 503, 504]: # Errores reintentables
                 log.warning(f"LLM devolvió error reintentable ({status_code}) para QID {qid}. Body: {llm_response.text[:200]}")
                 if retry_count < MAX_RETRIES:
                     # Reintentar: Publicar en tópico respuestas_llm_fallidas_reintentar
                     pregunta_data['retry_count'] = retry_count + 1
-                    # Añadir un delay antes de re-publicar podría hacerse aquí o en el consumidor de reintentos
+                    # Añade un delay antes de re-publicar podría hacerse aquí o en el consumidor de reintentos
                     publicar_mensaje(KAFKA_TOPIC_RESP_REINTENTAR, pregunta_data)
                 else:
                     log.error(f"Máximo número de reintentos ({MAX_RETRIES}) alcanzado para QID {qid}. Descartando.")
-                    # Podríamos enviar a un tópico de error permanente (Dead Letter Queue)
             else:
                 # Error no recuperable (ej. 400 Bad Request)
                 log.error(f"LLM devolvió error NO recuperable ({status_code}) para QID {qid}. Body: {llm_response.text[:200]}")
-                # Podríamos enviar a un tópico de error permanente
-
-            # Confirmar que el mensaje fue procesado (manual commit si es necesario, pero auto-commit es el default)
-            # consumer.commit() # Solo si `enable_auto_commit` es False
 
     log.info("Bucle de consumo finalizado.")
 

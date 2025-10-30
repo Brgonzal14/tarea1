@@ -177,7 +177,7 @@ services:
         condition: service_healthy
       kafka-init:
         condition: service_started
-
+  
   # Este servicio reinyecta mensajes según política de backoff y límites.
   retry_worker:
     build:

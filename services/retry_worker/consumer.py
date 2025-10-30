@@ -44,7 +44,8 @@ def inicializar_kafka_clients_retry():
                 group_id=KAFKA_CONSUMER_GROUP,
                 value_deserializer=lambda v: json.loads(v.decode('utf-8')),
                 auto_offset_reset='earliest',
-                consumer_timeout_ms=-1
+                consumer_timeout_ms=-1,
+                max_poll_interval_ms=300000
             )
             log.info("Consumidor Kafka (retry) inicializado.")
 
