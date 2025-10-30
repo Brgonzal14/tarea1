@@ -12,12 +12,6 @@ from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common import Configuration
 from pyflink.datastream import StreamExecutionEnvironment
 
-conf = Configuration()
-conf.set_string("pipeline.jars",
-                "file:///opt/flink/opt/flink-sql-connector-kafka-1.17.1.jar")
-env = StreamExecutionEnvironment.get_execution_environment(conf)
-
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger("flink_job")
 

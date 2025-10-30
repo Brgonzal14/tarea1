@@ -11,5 +11,5 @@ fi
 
 echo "[submitter] Enviando job.py a Flink…"
 # IMPORTANTE: sin http:// — la CLI espera host:puerto
-flink run -d -m jobmanager:8081 -py /job/job.py -pyfs /job
+flink run -d -m jobmanager:8081 -j /opt/flink/opt/flink-sql-connector-kafka-1.17.1.jar -py /job/job.py -pyfs /job
 echo "[submitter] Job enviado."
